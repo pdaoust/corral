@@ -372,45 +372,8 @@
 		}
 	};
 
-	// bind, unbind, or trigger an event on a specific corral -- used in the
-	// functions below
-	Corral._event = function _event (eventType, corral, eventName, callback) {
-		if (eventType === 'on' || eventType === 'off' || eventType === 'trigger') {
-			if (eventType === 'trigger') {
-				// the trigger event is handled by this method, but it shouldn't
-				// have any callback
-				callback = undefined;
-			}
-			if (corral instanceof Corral) {
-				// passed corral is a Corral object; call it directly
-				return corral[eventType](eventName, callback);
-			} else if (corrals.hasOwnProperty(corral)) {
-				// passed corral is a corral name; call it from the hash of
-				// instantiated corrals
-				return corrals[corral][eventType](eventName, callback);
-			}
-		} else {
-			throw new Error('Corral._event(): eventType ' + eventType + 'is invalid');
-		}
-	};
-
-	// bind a function to an event on a specific corral
-	Corral.on = function onCorral(corral, eventName, callback) {
-		return Corral._event('on', corral, eventName, callback);
-	};
-
-	// unbind a function to an event on a specific corral
-	Corral.off = function offCorral(corral, eventName, callback) {
-		return Corral._event('off', corral, eventName, callback);
-	};
-
-	// trigger an event on a specific corral
-	Corral.trigger = function triggerCorral(corral, eventName) {
-		return Corral._event('trigger', corral, eventName);
-	};
-
 	// cleanly delete a corral by reference or by name
-	Corral.remove = function deleteCorral(corral) {
+	Corral.remove = function removeCorral(corral) {
 		var corralName;
 
 		if (corral instanceof Corral) {
