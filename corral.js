@@ -172,11 +172,11 @@
 //      they haven't been triggered. This happens automatically on every screen
 //      resize/rotate event, so you shouldn't need to call it directly.
 //
-//  instance.queryString(fence)
+//  instance.query(fence)
 //
-//      Generate the CSS3 media query string to test against. Used internally
-//      on every screen resize/rotate event, but you might want to use it for
-//      testing purposes.
+//      Return an object that can be used to build a CSS3 media query string.
+//      Has three properties: axis, fence, and value. Used internally on every
+//      screen resize/rotate event, but you might want to use it for testing.
 //
 //  The Corral object also functions as a namespace, with the following helpers:
 //
@@ -264,6 +264,14 @@
         return {}.toString.call(val) === '[object Array]';
     };
 
+    // all instantiated corrals will be stored here so that checkAllCorrals()
+    // can iterate through them on each window resize event
+    var corrals = {};
+    var corralsStatic = {};
+    // static axes store the currently statically set min and max values, for
+    // use with class-based corral checking as opposed to media-query-based
+    var staticAxes = {};
+
     var resizeEventTimeoutID;
 
     var throttleEvent = function throttleEvent(callback) {
@@ -273,21 +281,26 @@
     };
 
     var tryMediaQuery = function (mediaQuery) {
+        var mediaQueryString = '(' + mediaQuery.fence + '-' + mediaQuery.axis + ':' + mediaQuery.value + ')';
         if (typeof win.matchMedia === 'function') {
             // look for native matchMedia first
-            return win.matchMedia(mediaQuery).matches;
+            return win.matchMedia(mediaQueryString).matches;
         } else if (typeof win.Modernizr === 'object' && typeof win.Modernizr.mq === 'function') {
             // look for Modernizr next, because it covers older browsers that
             // do support media queries but don't support matchMedia
-            return Modernizr.mq(mediaQuery);
+            return Modernizr.mq(mediaQueryString);
+        } else {
+            // fall back to unresponsive checking
+            if (staticAxes.hasOwnProperty(mediaQuery.axis)) {
+                if ((mediaQuery.fence === 'min' && parseFloat(staticAxes[mediaQuery.axis].min) >= parseFloat(mediaQuery.value)) ||
+                    (mediaQuery.fence === 'max' && parseFloat(staticAxes[mediaQuery.axis].max) <= parseFloat(mediaQuery.value))) {
+                    return true;
+                }
+            }
         }
         // otherwise, we don't support matching media queries via JavaScript
         return false;
     };
-
-    // all instantiated corrals will be stored here so that checkAllCorrals()
-    // can iterate through them on each window resize event
-    var corrals = {};
 
     var checkAllCorrals = function checkAllCorrals() {
         // iterate through all corrals, checking the media query of each of
@@ -315,16 +328,6 @@
         return fenceNames.indexOf(fenceName) > -1;
     };
 
-    // check for valid event names
-    var isEventName = function isEventName(eventName) {
-        try {
-            parseEventName(eventName);
-        } catch (e) {
-            return false;
-        }
-        return true;
-    };
-
     // parse an event name into an action and a fence, e.g.:
     //     {
     //         action: 'enter',
@@ -349,6 +352,15 @@
         return parsedEventInfo;
     };
 
+    // check for valid event names
+    var isEventName = function isEventName(eventName) {
+        try {
+            parseEventName(eventName);
+        } catch (e) {
+            return false;
+        }
+        return true;
+    };
 
     // check to see whether we've been passed a callback, an array of callbacks,
     // or something invalid, clean it up, and pass it back as an array
@@ -377,7 +389,7 @@
     };
 
     // corral constructor
-    var Corral = win.Corral = function CorralConstructor(name, axis, min, max, callbacks) {
+    var Corral = win.Corral = function Corral(name, axis, min, max, callbacks) {
         var _props = {
             name: name,
             axis: axis,
@@ -404,12 +416,12 @@
         // were any callbacks passed? If so, add them to this corral
         if (typeof callbacks === 'object') {
             if (!callbacks.hasOwnProperty('min') &&
-				!callbacks.hasOwnProperty('max') &&
-				!callbacks.hasOwnProperty('both') && (
-					callbacks.hasOwnProperty('enter') ||
-					callbacks.hasOwnProperty('exit')
-				)
-			) {
+                !callbacks.hasOwnProperty('max') &&
+                !callbacks.hasOwnProperty('both') && (
+                    callbacks.hasOwnProperty('enter') ||
+                    callbacks.hasOwnProperty('exit')
+                )
+            ) {
                 // this doesn't have any specific sets of callbacks for each of
                 // the fences, but it has either entry or exit callbacks, so
                 // assume that it's a set of callbacks for 'both'
@@ -588,13 +600,13 @@
     // check to see if we're inside one or both of this corral's fences
     Corral.prototype.check = function checkThisCorral() {
         var fences = ['min', 'max'],
-			fence;
+            fence;
 
         for (var i in fences) {
             if (fences.hasOwnProperty(i)) {
                 fence = fences[i];
 
-                if (tryMediaQuery(this.queryString(fence))) {
+                if (tryMediaQuery(this.query(fence))) {
                     if (!this.isActive(fence)) {
                         this.trigger('enter-' + fence);
                     }
@@ -608,7 +620,7 @@
     };
 
     // generate a media query for use in the above check
-    Corral.prototype.queryString = function queryString(fence) {
+    Corral.prototype.query = function query(fence) {
         if (fence === 'min' || fence === 'max') {
             var fenceValue = this[fence]();
             if (!exists(fenceValue)) {
@@ -623,9 +635,15 @@
                     fenceValue = '20000px';
                 }
             }
-            return '(' + fence + '-' + this.axis() + ':' + fenceValue + ')';
+
+            var queryObj = {
+                axis: this.axis(),
+                fence: fence,
+                value: fenceValue
+            };
+            return queryObj;
         } else {
-            throw new Error('Corral.queryString(): fence should be min or max');
+            throw new Error('Corral.query(): fence should be min or max');
         }
     };
 
@@ -650,21 +668,21 @@
         if (corrals.hasOwnProperty(corralName)) {
             return corrals[corralName];
         }
-    }
+    };
 
     // get a hash of all breakpoints, their axes, and min/max values. Returns an
     // object in this format:
     //     {
     //          mobile: { axis: 'width', max: '20em' },
-    //         	tablet: { axis: 'width', min: '20.0001em', max: '59.9999em' },
+    //          tablet: { axis: 'width', min: '20.0001em', max: '59.9999em' },
     //          desktop: { axis: 'width', min: '60em' }
     //          // et cetera for all the breakpoints you've defined
     //     }
     Corral.breakpoints = function getAllBreakpoints() {
         var breakpoints = {},
-			corralName,
-			breakpoint,
-			corral;
+            corralName,
+            breakpoint,
+            corral;
 
         for (corralName in corrals) {
             if (corrals.hasOwnProperty(corralName)) {
@@ -686,6 +704,132 @@
         return breakpoints;
     };
 
+    // static corral -- matches against a classname rather than a media query
+    var CorralStatic = win.CorralStatic = function CorralStatic(name, axis, min, max) {
+        var _props = {
+            name: name,
+            axis: axis,
+            min: null,
+            max: null,
+            active: false
+        };
+        // add this corral to the list
+        var _this = corralsStatic[name] = this;
+
+        // min and max are both optional values, but one of them ought to be set
+        // (if neither are set, then the events just don't fire)
+        if (exists(min)) {
+            _props.min = min;
+        }
+        if (exists(max)) {
+            _props.max = max;
+        }
+
+        // a generic accessor to get or set private values
+        // follows jQuery convention: undefined arguments make the function act
+        // as a getter; anything else (including null) makes it act as a setter
+        var _getSet = function _getSet(prop, val) {
+            if (val === undefined) {
+                return _props[prop];
+            } else {
+                _props[prop] = val;
+            }
+        };
+
+        // all the accessors for the public values
+        this.name = function (val) {
+            return _getSet('name', val);
+        };
+
+        this.axis = function (val) {
+            return _getSet('axis', val);
+        };
+
+        this.min = function (val) {
+            return _getSet('min', val);
+        };
+
+        this.max = function (val) {
+            return _getSet('max', val);
+        };
+
+        // find out if a given constraint in this
+        this.isActive = function isActive() {
+            return _getSet('active');
+        };
+
+        this.trigger = function CorralStaticTrigger(eventName, force) {
+            switch (eventName) {
+                case 'enter':
+                    if (!_props.active || force) {
+                        _props.active = true;
+                        if (!staticAxes.hasOwnProperty(_props.axis)) {
+                            staticAxes[_props.axis] = {};
+                        }
+                        // set static min and max values for this axis
+                        staticAxes[_props.axis].min = _props.min;
+                        staticAxes[_props.axis].max = _props.max;
+                    }
+                    break;
+
+                case 'exit':
+                    if (_props.active || force) {
+                        _props.active = false;
+                        // unset static min and max values for this axis
+                        if (staticAxes.hasOwnProperty(_props.axis)) {
+                            delete staticAxes[_props.axis];
+                        }
+                    }
+                    break;
+
+                default:
+                    throw new Error('CorralStatic.trigger(): invalid event name; must be either enter or exit');
+            }
+        };
+
+        // after construction, check this corral to see if it's active
+        this.check();
+    };
+
+    // cleanly remove a corral so it doesn't fire anymore
+    CorralStatic.prototype.remove = function deleteThisCorralStatic() {
+        CorralStatic.remove(this);
+    };
+
+    // check to see if we're inside one or both of this corral's fences
+    CorralStatic.prototype.check = function checkThisCorralStatic() {
+        var classRegex = new RegExp('\\b\\.' + this.name() + '\\b');
+        if (classRegex.test(win.document.documentElement.className)) {
+            this.trigger('enter');
+        } else {
+            this.trigger('exit');
+        }
+    };
+
+    // cleanly delete a corral by reference or by name
+    CorralStatic.remove = function removeCorralStatic(corral) {
+        var corralName;
+
+        if (corral instanceof CorralStatic) {
+            corralName = corral.name;
+        } else {
+            corralName = corral;
+        }
+
+        if (corralsStatic.hasOwnProperty(corralName)) {
+            delete corralsStatic[corralName];
+            return true;
+        }
+        return false;
+    };
+
+    CorralStatic.get = function getCorralStatic(corralName) {
+        if (corralsStatic.hasOwnProperty(corralName)) {
+            return corralsStatic[corralName];
+        }
+    };
+
+    // now we bind the corral checking mechanism to the window's resize event
     var checkAllCorralsThrottled = function checkAllCorralsThrottled() {
         throttleEvent(checkAllCorrals);
     };
