@@ -264,10 +264,24 @@
         return {}.toString.call(val) === '[object Array]';
     };
 
+    var inArray = function inArray(needle, haystack) {
+        if (Array.prototype.indexOf) {
+            return haystack.indexOf(needle) >= 0;
+        } else {
+            for (var i = 0; i < haystack.length; i ++) {
+                if (haystack[i] === needle) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     // all instantiated corrals will be stored here so that checkAllCorrals()
     // can iterate through them on each window resize event
     var corrals = {};
     var corralsStatic = {};
+    
     // static axes store the currently statically set min and max values, for
     // use with class-based corral checking as opposed to media-query-based
     var staticAxes = {};
@@ -280,26 +294,40 @@
         resizeEventTimeoutID = win.setTimeout(callback, 100);
     };
 
+    // find out how we're going to test for media query matches
+    var supportsMediaQueries = (function () {
+        if (typeof win.matchMedia === 'function') {
+            // browser itself supports media queries
+            return 'native';
+        } else if (typeof win.Modernizr === 'object' && typeof win.Modernizr.mq === 'function') {
+            // Modernizr is installed, it has media query support, and the
+            // browser supports media queries via CSS
+            return win.Modernizr.mq('only all') ? 'modernizr' : false;
+        }
+    })();
+
     var tryMediaQuery = function (mediaQuery) {
         var mediaQueryString = '(' + mediaQuery.fence + '-' + mediaQuery.axis + ':' + mediaQuery.value + ')';
-        if (typeof win.matchMedia === 'function') {
-            // look for native matchMedia first
-            return win.matchMedia(mediaQueryString).matches;
-        } else if (typeof win.Modernizr === 'object' && typeof win.Modernizr.mq === 'function') {
-            // look for Modernizr next, because it covers older browsers that
+        var match = false;
+
+        if (supportsMediaQueries === 'native') {
+            // use native matchMedia first
+            match = win.matchMedia(mediaQueryString).matches;
+        } else if (supportsMediaQueries === 'modernizr') {
+            // try Modernizr next, because it covers older browsers that
             // do support media queries but don't support matchMedia
-            return Modernizr.mq(mediaQueryString);
-        } else {
-            // fall back to unresponsive checking
-            if (staticAxes.hasOwnProperty(mediaQuery.axis)) {
-                if ((mediaQuery.fence === 'min' && parseFloat(staticAxes[mediaQuery.axis].min) >= parseFloat(mediaQuery.value)) ||
-                    (mediaQuery.fence === 'max' && parseFloat(staticAxes[mediaQuery.axis].max) <= parseFloat(mediaQuery.value))) {
-                    return true;
-                }
+            match = Modernizr.mq(mediaQueryString);
+        }
+
+        if (!match && staticAxes.hasOwnProperty(mediaQuery.axis)) {
+            // fall back to unresponsive checking if nothing above matched
+            if ((mediaQuery.fence === 'min' && parseFloat(staticAxes[mediaQuery.axis].min) >= parseFloat(mediaQuery.value)) ||
+                (mediaQuery.fence === 'max' && parseFloat(staticAxes[mediaQuery.axis].max) <= parseFloat(mediaQuery.value))) {
+                match = true;
             }
         }
-        // otherwise, we don't support matching media queries via JavaScript
-        return false;
+        
+        return match;
     };
 
     var checkAllCorrals = function checkAllCorrals() {
@@ -317,7 +345,7 @@
 
     // check for same
     var isActionName = function isActionName(actionName) {
-        return actionNames.indexOf(actionName) > -1;
+        return inArray(actionName, actionNames);
     };
 
     // valid fence names
@@ -325,7 +353,7 @@
 
     // check for same
     var isFenceName = function isFenceName(fenceName) {
-        return fenceNames.indexOf(fenceName) > -1;
+        return inArray(fenceName, fenceNames);
     };
 
     // parse an event name into an action and a fence, e.g.:
@@ -334,21 +362,32 @@
     //         fence: 'min'
     //     }
     var parseEventName = function parseEventName(eventName) {
-        var splitEventName = eventName.split('-');
+        var namespaceAndEventName = eventName.split('.');
+        var fenceAndEventName = namespaceAndEventName[0].split('-');
 
-        if (!isArray(splitEventName) || splitEventName.length < 2) {
+        if (!isArray(fenceAndEventName) || fenceAndEventName.length < 2) {
             throw new Error('parseEventName(): event name doesn\'t seem to have a hyphen');
         }
 
-        if (!isActionName(splitEventName[0])) {
+        if (!isActionName(fenceAndEventName[0])) {
             throw new Error('parseEventName(): action part of event name is invalid');
         }
 
-        if (!isFenceName(splitEventName[1])) {
+        if (!isFenceName(fenceAndEventName[1])) {
             throw new Error('parseEventName(): fence part of event name is invalid');
         }
 
-        var parsedEventInfo = { 'action': splitEventName[0], 'fence': splitEventName[1] };
+        var parsedEventInfo = { 'action': fenceAndEventName[0], 'fence': fenceAndEventName[1] };
+
+        // if a namespace is specified, add that to the object
+        if (namespaceAndEventName.length > 1) {
+            namespaceAndEventName.shift();
+            parsedEventInfo.namespace = namespaceAndEventName.join('.');
+            parsedEventInfo.actionNamespaced = parsedEventInfo.action + '.' + parsedEventInfo.namespace;
+        } else {
+            parsedEventInfo.actionNamespaced = parsedEventInfo.action;
+        }
+
         return parsedEventInfo;
     };
 
@@ -487,7 +526,11 @@
                             // this time
                             callbacks[i]();
                         }
-                        _callbacks[eventInfo.fence][eventInfo.action].push(callbacks[i]);
+                        // if the namespace hasn't been registered yet, register it
+                        if (!_callbacks[eventInfo.fence].hasOwnProperty(eventInfo.actionNamespaced)) {
+                            _callbacks[eventInfo.fence][eventInfo.actionNamespaced] = [];
+                        }
+                        _callbacks[eventInfo.fence][eventInfo.actionNamespaced].push(callbacks[i]);
                     }
                 }
             } else {
@@ -496,38 +539,19 @@
         };
 
         // event unbinding
-        this.off = function corralOff(eventName, callbacks) {
+        this.off = function corralOff(eventName) {
             var i;
 
             if (isEventName(eventName)) {
-                var eventInfo = parseEventName(eventName, 'constraint');
-
-                if (callbacks !== undefined) {
-                    callbacks = sanitiseCallbacks(callbacks);
-
-                    if (callbacks !== undefined) {
-                        for (i in callbacks) {
-                            if (callbacks.hasOwnProperty(i)) {
-                                // check for existence of callback in the already
-                                // set up callbacks
-                                var callbackIndex = _callbacks[eventInfo.fence][eventInfo.action].indexOf(callbacks[i]);
-                                if (callbackIndex > -1) {
-                                    // only get rid of this function
-                                    delete _callbacks[eventInfo.callback.fence][eventInfo.action][callbackIndex];
-                                }
-                            }
-                        }
+                var eventInfo = parseEventName(eventName);
+                if (_callbacks[eventInfo.fence].hasOwnProperty(eventInfo.actionNamespaced)) {
+                    if (eventInfo.hasOwnProperty('namespace')) {
+                        // if this is a namespaced event, just delete all the
+                        // callbacks *and* the namespace
+                        delete _callbacks[eventInfo.fence][eventInfo.actionNamespaced];
                     } else {
-                        // something funky; we weren't passed any valid callbacks
-                        throw new Error('Corral.off(): no valid callbacks passed');
-                    }
-                } else {
-                    // if a callback wasn't specified, then delete all callbacks
-                    // for this event
-                    for (i in _callbacks[eventInfo.callback.fence][eventInfo.callback.action]) {
-                        if (_callbacks[eventInfo.callback.fence][eventInfo.callback.action].hasOwnProperty(i)) {
-                            delete _callbacks[eventInfo.callback.fence][eventInfo.callback.action][i];
-                        }
+                        // otherwise just delete the events
+                        _callbacks[eventInfo.fence][eventInfo.action] = [];
                     }
                 }
             } else {
@@ -541,7 +565,11 @@
         // even if it's already active. The default behaviour is just to not
         // bother running the callbacks on this event if it's already active.
         this.trigger = function corralTrigger(eventName, force, triggerBoth) {
-            if (typeof triggerBoth !== 'boolean') {
+            if (exists(triggerBoth)) {
+                // cast to Boolean
+                triggerBoth = !!triggerBoth;
+            } else {
+                // default to true
                 triggerBoth = true;
             }
 
@@ -558,18 +586,22 @@
                     return;
                 }
 
-                // setup or teardown the callbacks that pertain to this event
-                for (var i = 0; i < fenceCallbacks[eventInfo.action].length; i++) {
-                    fenceCallbacks[eventInfo.action][i]();
+                // go through the list of events
+                for (var eventKey in fenceCallbacks) {
+                    // check if this namespaced or non-namespaced event matches
+                    // the passed event
+                    if (eventKey.indexOf(eventInfo.action) === 0) {
+                        // setup or teardown the callbacks that pertain to this event
+                        for (var i = 0; i < fenceCallbacks[eventKey].length; i++) {
+                            fenceCallbacks[eventKey][i]();
+                        }
+                    }
                 }
 
                 // set the active flag appropriately
                 fenceCallbacks.active = (eventInfo.action === 'enter');
 
-                if (eventInfo.fence === 'both') {
-                    // set the active flag for both 'enter' and 'exit'
-                    _callbacks.min.active = _callbacks.max.active = fenceCallbacks.active;
-                } else if (triggerBoth) {
+                if (triggerBoth) {
                     // now process all 'both' callbacks -- that is, callbacks
                     // that apply only when we're in both fences of this corral
                     var complement = (eventInfo.fence === 'min' ? 'max' : 'min');
@@ -607,13 +639,9 @@
                 fence = fences[i];
 
                 if (tryMediaQuery(this.query(fence))) {
-                    if (!this.isActive(fence)) {
-                        this.trigger('enter-' + fence);
-                    }
+                    this.trigger('enter-' + fence);
                 } else {
-                    if (this.isActive(fence)) {
-                        this.trigger('exit-' + fence);
-                    }
+                    this.trigger('exit-' + fence);
                 }
             }
         }
@@ -705,14 +733,28 @@
     };
 
     // static corral -- matches against a classname rather than a media query
+    // you don't actually give this corral any event handlers of its own; it
+    // automatically fires the event handlers of any corrals that match its
+    // width
     var CorralStatic = win.CorralStatic = function CorralStatic(name, axis, min, max) {
-        var _props = {
-            name: name,
-            axis: axis,
-            min: null,
-            max: null,
-            active: false
-        };
+        // the second argument can be a corral instead, in which case it gets
+        // the axis, min, and max from that corral
+        var _props;
+        if (axis instanceof Corral) {
+            _props = {
+                corral: axis,
+                name: name,
+                active: false
+            }
+        } else {
+            _props = {
+                name: name,
+                axis: axis,
+                min: null,
+                max: null,
+                active: false
+            };
+        }
         // add this corral to the list
         var _this = corralsStatic[name] = this;
 
@@ -730,6 +772,15 @@
         // as a getter; anything else (including null) makes it act as a setter
         var _getSet = function _getSet(prop, val) {
             if (val === undefined) {
+                var corralables = ['axis', 'min', 'max'];
+                if (inArray(prop, corralables) && exists(_props.corral) && !exists(_props[prop])) {
+                    // value is not hardcoded in this static corral; get it from
+                    // the dynamic corral that was passed to this corral on
+                    // construction. This way, if the corral is ever changed,
+                    // the changes will propagate to this static corral auto-
+                    // matically.
+                    return _props.corral[prop]();
+                }
                 return _props[prop];
             } else {
                 _props[prop] = val;
@@ -753,7 +804,7 @@
             return _getSet('max', val);
         };
 
-        // find out if a given constraint in this
+        // find out if this corral is true (no min or max)
         this.isActive = function isActive() {
             return _getSet('active');
         };
@@ -763,12 +814,12 @@
                 case 'enter':
                     if (!_props.active || force) {
                         _props.active = true;
-                        if (!staticAxes.hasOwnProperty(_props.axis)) {
-                            staticAxes[_props.axis] = {};
+                        if (!staticAxes.hasOwnProperty(_this.axis())) {
+                            staticAxes[_this.axis()] = {};
                         }
                         // set static min and max values for this axis
-                        staticAxes[_props.axis].min = _props.min;
-                        staticAxes[_props.axis].max = _props.max;
+                        staticAxes[_this.axis()].min = _this.min();
+                        staticAxes[_this.axis()].max = _this.max();
                     }
                     break;
 
@@ -776,8 +827,8 @@
                     if (_props.active || force) {
                         _props.active = false;
                         // unset static min and max values for this axis
-                        if (staticAxes.hasOwnProperty(_props.axis)) {
-                            delete staticAxes[_props.axis];
+                        if (staticAxes.hasOwnProperty(_this.axis())) {
+                            delete staticAxes[_this.axis()];
                         }
                     }
                     break;
@@ -785,6 +836,9 @@
                 default:
                     throw new Error('CorralStatic.trigger(): invalid event name; must be either enter or exit');
             }
+
+            // now see what matches
+            checkAllCorrals();
         };
 
         // after construction, check this corral to see if it's active
@@ -798,7 +852,7 @@
 
     // check to see if we're inside one or both of this corral's fences
     CorralStatic.prototype.check = function checkThisCorralStatic() {
-        var classRegex = new RegExp('\\b\\.' + this.name() + '\\b');
+        var classRegex = new RegExp('\\b' + this.name() + '\\b');
         if (classRegex.test(win.document.documentElement.className)) {
             this.trigger('enter');
         } else {
@@ -829,9 +883,36 @@
         }
     };
 
+    // IE7 fires the resize event whenever an object on the page resizes; we
+    // need to see if the viewport actually changed. This function courtesy of:
+    // http://andylangton.co.uk/articles/javascript/get-viewport-size-javascript/
+    var getViewportSize = function() {
+        var viewportwidth;
+        var viewportheight;
+  
+        if (typeof window.innerWidth != 'undefined') {
+            // the more standards compliant browsers (mozilla/netscape/opera/IE7) use window.innerWidth and window.innerHeight
+            viewportwidth = window.innerWidth;
+            viewportheight = window.innerHeight;
+        } else if (typeof document.documentElement != 'undefined'
+                   && typeof document.documentElement.clientWidth !=
+                   'undefined' && document.documentElement.clientWidth != 0) {
+            // IE6 in standards compliant mode (i.e. with a valid doctype as the first line in the document)
+            viewportwidth = document.documentElement.clientWidth,
+            viewportheight = document.documentElement.clientHeight
+        }
+        return { width: viewportwidth, height: viewportheight };
+    };
+
+    var viewportSizeOriginal = getViewportSize();
+
     // now we bind the corral checking mechanism to the window's resize event
     var checkAllCorralsThrottled = function checkAllCorralsThrottled() {
-        throttleEvent(checkAllCorrals);
+        var viewportSizeNew = getViewportSize();
+        if (viewportSizeNew.width !== viewportSizeOriginal.width &&
+            viewportSizeNew.height !== viewportSizeOriginal.height) {
+            throttleEvent(checkAllCorrals);
+        }
     };
 
     if (win.addEventListener) {
